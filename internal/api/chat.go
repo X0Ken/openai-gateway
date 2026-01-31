@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -8,12 +9,12 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/X0Ken/openai-gateway/internal/auth"
 	"github.com/X0Ken/openai-gateway/internal/channel"
 	"github.com/X0Ken/openai-gateway/internal/metrics"
 	"github.com/X0Ken/openai-gateway/internal/router"
 	"github.com/X0Ken/openai-gateway/pkg/database"
+	"github.com/gin-gonic/gin"
 )
 
 // Handler handles OpenAI API requests
@@ -48,6 +49,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup, authMiddleware *auth.Middle
 type ChatCompletionRequest struct {
 	Model    string                  `json:"model" binding:"required"`
 	Messages []ChatCompletionMessage `json:"messages" binding:"required"`
+	Stream   bool                    `json:"stream,omitempty"`
 }
 
 // ChatCompletionMessage represents a message in the conversation
@@ -100,23 +102,43 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
-	// Forward request to channel
-	start := time.Now()
-	resp, err := h.forwardRequest(routeResult.Channel, routeResult.BackendModelName, &req)
-	duration := time.Since(start)
+	// Handle streaming vs non-streaming
+	if req.Stream {
+		// Streaming mode
+		start := time.Now()
+		err := h.forwardStreamRequest(c, routeResult.Channel, routeResult.BackendModelName, &req)
+		duration := time.Since(start)
 
-	// Update metrics
-	metrics.RecordChannelLatency(routeResult.Channel.Name, req.Model, duration)
+		// Update metrics
+		metrics.RecordChannelLatency(routeResult.Channel.Name, req.Model, duration)
 
-	if err != nil {
-		metrics.RecordChannelError(routeResult.Channel.Name)
-		h.db.UpdateChannelMetrics(routeResult.Channel.ID, duration.Seconds(), false)
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-		return
+		if err != nil {
+			metrics.RecordChannelError(routeResult.Channel.Name)
+			h.db.UpdateChannelMetrics(routeResult.Channel.ID, duration.Seconds(), false)
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+
+		h.db.UpdateChannelMetrics(routeResult.Channel.ID, duration.Seconds(), true)
+	} else {
+		// Non-streaming mode
+		start := time.Now()
+		resp, err := h.forwardRequest(routeResult.Channel, routeResult.BackendModelName, &req)
+		duration := time.Since(start)
+
+		// Update metrics
+		metrics.RecordChannelLatency(routeResult.Channel.Name, req.Model, duration)
+
+		if err != nil {
+			metrics.RecordChannelError(routeResult.Channel.Name)
+			h.db.UpdateChannelMetrics(routeResult.Channel.ID, duration.Seconds(), false)
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+
+		h.db.UpdateChannelMetrics(routeResult.Channel.ID, duration.Seconds(), true)
+		c.JSON(http.StatusOK, resp)
 	}
-
-	h.db.UpdateChannelMetrics(routeResult.Channel.ID, duration.Seconds(), true)
-	c.JSON(http.StatusOK, resp)
 }
 
 // forwardRequest forwards the request to the backend channel
@@ -159,6 +181,64 @@ func (h *Handler) forwardRequest(channel *database.Channel, backendModelName str
 	}
 
 	return &result, nil
+}
+
+// forwardStreamRequest forwards the request to the backend channel and streams the response
+func (h *Handler) forwardStreamRequest(c *gin.Context, channel *database.Channel, backendModelName string, req *ChatCompletionRequest) error {
+	// Prepare request body with backend-specific model name and stream enabled
+	forwardReq := *req
+	forwardReq.Model = backendModelName
+	forwardReq.Stream = true
+	body, err := json.Marshal(forwardReq)
+	if err != nil {
+		return err
+	}
+
+	// Create request
+	url := channel.BaseURL + "/chat/completions"
+	httpReq, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+channel.APIKey)
+
+	// Send request
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("backend error: %s", string(body))
+	}
+
+	// Set SSE headers
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+
+	// Stream the response
+	reader := bufio.NewReader(resp.Body)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+
+		// Forward the line to the client
+		c.Writer.Write([]byte(line))
+		c.Writer.Flush()
+	}
+
+	return nil
 }
 
 // Model represents an OpenAI model
