@@ -2,10 +2,11 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
-	_ "gopkg.in/yaml.v3"
+	"gopkg.in/yaml.v3"
 )
 
 // Config holds all configuration for the gateway
@@ -97,11 +98,23 @@ func NewService(path string) (*Service, error) {
 
 // Load reads configuration from file
 func (s *Service) Load() error {
-	// For now, return default config
-	// In production, this would read from YAML file
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	s.config = DefaultConfig()
+
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	if err := yaml.Unmarshal(data, s.config); err != nil {
+		return fmt.Errorf("failed to parse config file: %w", err)
+	}
+
 	return nil
 }
 

@@ -1,10 +1,10 @@
 package server
 
 import (
+	"fmt"
 	"log"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/X0Ken/openai-gateway/internal/admin"
 	"github.com/X0Ken/openai-gateway/internal/api"
 	"github.com/X0Ken/openai-gateway/internal/auth"
@@ -17,6 +17,7 @@ import (
 	"github.com/X0Ken/openai-gateway/internal/web"
 	"github.com/X0Ken/openai-gateway/pkg/database"
 	"github.com/X0Ken/openai-gateway/pkg/health"
+	"github.com/gin-gonic/gin"
 )
 
 // Run starts the HTTP server with all components
@@ -92,6 +93,7 @@ func Run() error {
 	webHandler := web.NewHandler()
 	webHandler.RegisterRoutes(r)
 
-	log.Printf("Server starting on :%d", cfg.Server.Port)
-	return r.Run("0.0.0.0:8080")
+	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
+	log.Printf("Server starting on %s", addr)
+	return r.Run(addr)
 }
