@@ -1,0 +1,19 @@
+server:
+  port: 8080
+  host: "0.0.0.0"
+  read_timeout: 30
+  write_timeout: 30
+
+database:
+  path: "./gateway.db"
+
+health_check:
+  interval: 30
+  timeout: 5
+
+session:
+  idle_timeout: 30
+
+metrics:
+  enabled: true
+  port: 9090
